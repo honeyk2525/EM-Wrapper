@@ -3,23 +3,26 @@
 GROMACS Runner — macOS Desktop Application
 ===========================================
 A graphical wrapper around GROMACS CLI commands for running
-energy minimization on a selected PDB file.
+energy minimization on one or more PDB files simultaneously.
 
-Workflow:
-  1. User selects a .pdb file via file dialog
-  2. A workspace directory is created next to the PDB file
-  3. MDP parameter files (ions.mdp, minim.mdp) are auto-generated
-  4. GROMACS commands are executed sequentially:
+Workflow (per file):
+  1. User selects one or more .pdb files via file dialog
+  2. All runs start sequentially, each in its own thread
+  3. A workspace directory is created next to each PDB file
+  4. MDP parameter files (ions.mdp, minim.mdp) are auto-generated
+  5. GROMACS commands are executed sequentially per job:
        pdb2gmx → editconf → solvate → grompp (ions) →
        genion → grompp (em) → mdrun (em) → trjconv (center)
-  5. The final centered structure is saved as <original_name>.pdb
+  6. The final centered structure is saved as <original_name>.pdb
 
 Features:
+  - Select multiple PDB files; all run sequentially
+  - Job table showing per-file status and step progress
+  - Click any job row to view its log in the pane below
+  - Cancel All button to abort every running job
+  - Open Output Folder for the selected job after completion
+  - Automatic log file (run.log) saved in each workspace
   - Force-field selection dropdown (default: CHARMM27)
-  - Visual progress bar with step counter
-  - Cancel button to abort a running pipeline
-  - Open output folder in Finder after completion
-  - Automatic log file (run.log) saved in workspace
   - Settings dialog to configure GROMACS binary path
 
 Requirements:
@@ -28,11 +31,11 @@ Requirements:
   - Python 3.8+ with tkinter (included with macOS Python)
 
 Usage:
-  python3 gmx_runner.py
+  python3 em_mac.py
 
 Packaging (macOS .app):
   pip3 install pyinstaller
-  pyinstaller --windowed --onefile gmx_runner.py
+  pyinstaller --windowed --onefile em_mac.py
 """
 
 import json
@@ -65,7 +68,6 @@ def load_config() -> dict:
         if CONFIG_PATH.is_file():
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-            # Merge with defaults so new keys are always present
             return {**DEFAULT_CONFIG, **saved}
     except Exception:
         pass
@@ -85,8 +87,6 @@ def save_config(config: dict):
 # Available Force Fields
 # =============================================================================
 
-# These are the standard GROMACS force-field directory names.
-# The -ff flag accepts them directly, so no interactive prompt is needed.
 FORCE_FIELDS = {
     "CHARMM27":        "charmm27",
     "AMBER03":         "amber03",
@@ -106,7 +106,6 @@ FORCE_FIELDS = {
 
 DEFAULT_FF = "CHARMM27"
 
-# Appropriate water model for each force field
 WATER_MODELS = {
     "charmm27":       "tip3p",
     "amber03":        "tip3p",
@@ -171,7 +170,7 @@ pbc             = xyz
 class GromacsPipeline:
     """Encapsulates the GROMACS energy-minimization workflow."""
 
-    TOTAL_STEPS = 8  # number of GROMACS commands
+    TOTAL_STEPS = 8
 
     def __init__(
         self,
@@ -182,17 +181,8 @@ class GromacsPipeline:
         status_callback,
         progress_callback,
     ):
-        """
-        Args:
-            pdb_path:          Absolute path to the user-selected .pdb file.
-            ff_key:            Display name of the force field (key in FORCE_FIELDS).
-            gmx_bin:           Path to the gmx binary (e.g. "gmx" or "/opt/homebrew/bin/gmx").
-            log_callback:      Callable(str) — appends text to the GUI output area.
-            status_callback:   Callable(str) — updates the GUI status label.
-            progress_callback: Callable(int, int) — updates the progress bar (current, total).
-        """
         self.pdb_path = pdb_path
-        self.pdb_name = pdb_path.stem                 # e.g. "PROT"
+        self.pdb_name = pdb_path.stem
         self.pdb_dir = pdb_path.parent
         self.ff_dir = FORCE_FIELDS.get(ff_key, "charmm27")
         self.water_model = WATER_MODELS.get(self.ff_dir, "tip3p")
@@ -203,17 +193,13 @@ class GromacsPipeline:
         self.set_status = status_callback
         self.set_progress = progress_callback
         self._cancelled = False
-        self._log_file = None   # file handle for run.log
+        self._log_file = None
 
     # ------------------------------------------------------------------
     # Workspace
     # ------------------------------------------------------------------
 
     def _create_workspace(self) -> Path:
-        """
-        Create a unique run directory next to the PDB file.
-        Naming: PROT_run → PROT_run_2 → PROT_run_3 → …
-        """
         base = self.pdb_dir / f"{self.pdb_name}_run"
         if not base.exists():
             base.mkdir(parents=True)
@@ -232,7 +218,6 @@ class GromacsPipeline:
     # ------------------------------------------------------------------
 
     def _log_and_file(self, text: str):
-        """Write to both the GUI and the log file."""
         self.log(text)
         if self._log_file:
             try:
@@ -246,7 +231,6 @@ class GromacsPipeline:
     # ------------------------------------------------------------------
 
     def _write_mdp_files(self):
-        """Write ions.mdp and minim.mdp inside the run directory."""
         (self.run_dir / "ions.mdp").write_text(IONS_MDP, encoding="utf-8")
         (self.run_dir / "minim.mdp").write_text(MINIM_MDP, encoding="utf-8")
         self._log_and_file("✓ Generated ions.mdp\n")
@@ -258,18 +242,6 @@ class GromacsPipeline:
 
     def _run_command(self, cmd: str, stdin_text: Optional[str] = None,
                      label: str = "") -> bool:
-        """
-        Execute a single shell command inside the run directory.
-
-        Args:
-            cmd:        The command string to execute.
-            stdin_text: Optional text to pipe into the process's stdin
-                        (for interactive prompts like group selection).
-            label:      Human-readable label for the status bar.
-
-        Returns:
-            True if the command succeeded (returncode == 0), False otherwise.
-        """
         if self._cancelled:
             return False
 
@@ -334,11 +306,9 @@ class GromacsPipeline:
     # ------------------------------------------------------------------
 
     def run(self) -> bool:
-        """Execute the complete energy-minimization workflow."""
         name = self.pdb_name
         gmx = self.gmx
 
-        # --- Pre-flight: verify gmx is reachable --------------------------
         if not shutil.which(self.gmx) and not Path(self.gmx).is_file():
             self.log(
                 f"✗ GROMACS binary '{self.gmx}' not found in PATH.\n"
@@ -347,11 +317,9 @@ class GromacsPipeline:
             self.set_status("Error — gmx not found")
             return False
 
-        # --- Step 0: Create workspace ----------------------------------
         self.set_status("Creating workspace…")
         self.run_dir = self._create_workspace()
 
-        # Open the log file for the duration of the run
         self._log_file = open(
             self.run_dir / "run.log", "w", encoding="utf-8"
         )
@@ -361,21 +329,12 @@ class GromacsPipeline:
         self._log_and_file(f"💧 Water model: {self.water_model}\n")
         self._log_and_file(f"⚙ GROMACS binary: {self.gmx}\n\n")
 
-        # Copy PDB into workspace
         dest_pdb = self.run_dir / self.pdb_path.name
         shutil.copy2(str(self.pdb_path), str(dest_pdb))
         self._log_and_file(f"✓ Copied {self.pdb_path.name} → workspace\n")
 
-        # Write MDP parameter files
         self.set_status("Generating parameter files…")
         self._write_mdp_files()
-
-        # --- GROMACS commands ------------------------------------------
-        #
-        # Interactive input:
-        #   • pdb2gmx  — force field set via -ff flag (no prompt)
-        #   • genion   — sends "SOL\n" to select the solvent group by name
-        #   • trjconv  — sends "Protein\nSystem\n" to select groups by name
 
         # Pre-quote filenames for shell safety (handles spaces, etc.)
         q = shlex.quote
@@ -406,7 +365,7 @@ class GromacsPipeline:
             },
             {
                 "cmd":   f"{gmx} grompp -f ions.mdp -c {f_solv} "
-                         f"-p topol.top -o ions.tpr",
+                         f"-p topol.top -o ions.tpr -maxwarn 1",
                 "stdin": None,
                 "label": "[4/8] grompp — preparing for ion addition…",
             },
@@ -454,7 +413,6 @@ class GromacsPipeline:
                 self._close_log()
                 return False
 
-        # --- Rename centered.pdb → original PDB name ------------------
         centered = self.run_dir / "centered.pdb"
         final_pdb = self.run_dir / self.pdb_path.name
         try:
@@ -467,9 +425,8 @@ class GromacsPipeline:
                 f"\n⚠ Could not rename centered.pdb: {exc}\n"
             )
 
-        # --- Done! -----------------------------------------------------
         self.set_progress(self.TOTAL_STEPS, self.TOTAL_STEPS)
-        self.set_status("✅ Completed — energy minimization finished")
+        self.set_status("✅ Completed")
         self._log_and_file(f"\n{'='*60}\n")
         self._log_and_file("🎉 Energy minimization completed successfully!\n")
         self._log_and_file(f"📁 All output files are in:\n   {self.run_dir}\n")
@@ -478,11 +435,9 @@ class GromacsPipeline:
         return True
 
     def cancel(self):
-        """Signal the pipeline to stop after the current command."""
         self._cancelled = True
 
     def _close_log(self):
-        """Close the log file handle."""
         if self._log_file:
             try:
                 self._log_file.close()
@@ -498,18 +453,15 @@ class GromacsPipeline:
 class SettingsDialog(tk.Toplevel):
     """Modal dialog for configuring the GROMACS binary path."""
 
-    def __init__(self, parent, config: dict):
+    def __init__(self, parent, cfg: dict):
         super().__init__(parent)
         self.title("Settings")
-        self.config = config
-        self.result = None  # set to updated config on OK
+        self.cfg = cfg
+        self.result = None
         self.resizable(False, False)
-        self.grab_set()  # modal
-
-        # Make the dialog appear centred over the parent
+        self.grab_set()
         self.transient(parent)
 
-        # --- Widgets ---
         frame = tk.Frame(self, padx=16, pady=16)
         frame.pack(fill=tk.BOTH, expand=True)
 
@@ -517,7 +469,7 @@ class SettingsDialog(tk.Toplevel):
             frame, text="GROMACS binary path:", font=("Helvetica", 12),
         ).grid(row=0, column=0, sticky=tk.W, pady=(0, 4))
 
-        self.gmx_var = tk.StringVar(value=config.get("gmx_path", "gmx"))
+        self.gmx_var = tk.StringVar(value=cfg.get("gmx_path", "gmx"))
         entry = tk.Entry(frame, textvariable=self.gmx_var, width=40,
                          font=("Menlo", 12))
         entry.grid(row=1, column=0, sticky=tk.EW, pady=(0, 4))
@@ -536,7 +488,6 @@ class SettingsDialog(tk.Toplevel):
         )
         btn_browse.grid(row=1, column=1, padx=(6, 0))
 
-        # --- OK / Cancel ---
         btn_frame = tk.Frame(frame)
         btn_frame.grid(row=3, column=0, columnspan=2, sticky=tk.E)
 
@@ -551,9 +502,9 @@ class SettingsDialog(tk.Toplevel):
             self.gmx_var.set(path)
 
     def _save(self):
-        self.config["gmx_path"] = self.gmx_var.get().strip() or "gmx"
-        self.result = self.config
-        save_config(self.config)
+        self.cfg["gmx_path"] = self.gmx_var.get().strip() or "gmx"
+        self.result = self.cfg
+        save_config(self.cfg)
         self.destroy()
 
 
@@ -567,13 +518,16 @@ class GromacsRunnerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("GROMACS Runner")
-        self.root.geometry("860x680")
-        self.root.minsize(640, 480)
+        self.root.geometry("960x780")
+        self.root.minsize(700, 540)
 
         self.config = load_config()
-        self.pipeline: Optional[GromacsPipeline] = None
-        self._running = False
-        self._last_run_dir: Optional[Path] = None
+
+        # item_id -> {"pipeline", "thread", "log": list[str], "run_dir"}
+        self._jobs: dict = {}
+        self._active_item: Optional[str] = None  # tree row whose log is shown
+        self._running_count = 0
+        self._job_queue: list = []  # item_ids waiting to start
 
         self._build_ui()
 
@@ -582,19 +536,16 @@ class GromacsRunnerApp:
     # ------------------------------------------------------------------
 
     def _build_ui(self):
-        """Lay out all widgets."""
-
-        # === Row 1: Select PDB + Force Field + Settings ================
-        row1 = tk.Frame(self.root, padx=12, pady=(10, 4))
-        row1.pack(fill=tk.X)
+        # === Row 1: Select PDB(s) + Force Field + Settings =============
+        row1 = tk.Frame(self.root, padx=12)
+        row1.pack(fill=tk.X, pady=(10, 4))
 
         self.btn_select = tk.Button(
-            row1, text="Select PDB", command=self._on_select_pdb,
-            width=12, font=("Helvetica", 13, "bold"),
+            row1, text="Select PDB(s)", command=self._on_select_pdb,
+            width=14, font=("Helvetica", 13, "bold"),
         )
         self.btn_select.pack(side=tk.LEFT)
 
-        # Force-field dropdown
         tk.Label(row1, text="  Force Field:", font=("Helvetica", 12)).pack(
             side=tk.LEFT,
         )
@@ -609,20 +560,19 @@ class GromacsRunnerApp:
         )
         ff_menu.pack(side=tk.LEFT, padx=(4, 0))
 
-        # Settings button (gear icon)
         self.btn_settings = tk.Button(
             row1, text="⚙ Settings", command=self._open_settings,
             font=("Helvetica", 11),
         )
         self.btn_settings.pack(side=tk.RIGHT)
 
-        # === Row 2: Cancel + Open Folder + Status ======================
-        row2 = tk.Frame(self.root, padx=12, pady=(0, 4))
-        row2.pack(fill=tk.X)
+        # === Row 2: Cancel All + Open Folder + Status ==================
+        row2 = tk.Frame(self.root, padx=12)
+        row2.pack(fill=tk.X, pady=(0, 4))
 
         self.btn_cancel = tk.Button(
-            row2, text="Cancel", command=self._on_cancel,
-            width=8, state=tk.DISABLED, font=("Helvetica", 11),
+            row2, text="Cancel All", command=self._on_cancel,
+            width=10, state=tk.DISABLED, font=("Helvetica", 11),
             fg="#cc3333",
         )
         self.btn_cancel.pack(side=tk.LEFT)
@@ -633,30 +583,47 @@ class GromacsRunnerApp:
         )
         self.btn_open_folder.pack(side=tk.LEFT, padx=(8, 0))
 
-        self.status_var = tk.StringVar(value="Waiting for file")
+        self.status_var = tk.StringVar(value="Waiting for files")
         self.status_label = tk.Label(
             row2, textvariable=self.status_var, anchor=tk.W,
             font=("Helvetica", 12), padx=12,
         )
         self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # === Row 3: Progress bar =======================================
-        row3 = tk.Frame(self.root, padx=12, pady=(0, 6))
-        row3.pack(fill=tk.X)
+        # === Row 3: Job table ==========================================
+        tree_outer = tk.Frame(self.root, padx=12)
+        tree_outer.pack(fill=tk.X, pady=(0, 4))
 
-        self.progress_var = tk.DoubleVar(value=0.0)
-        self.progress_bar = ttk.Progressbar(
-            row3, variable=self.progress_var,
-            maximum=100, mode="determinate",
+        vsb = ttk.Scrollbar(tree_outer, orient=tk.VERTICAL)
+        self.job_tree = ttk.Treeview(
+            tree_outer,
+            columns=("status", "step"),
+            height=7,
+            yscrollcommand=vsb.set,
+            selectmode="browse",
         )
-        self.progress_bar.pack(fill=tk.X)
+        vsb.config(command=self.job_tree.yview)
 
-        self.progress_label = tk.Label(
-            row3, text="Step 0/8", font=("Helvetica", 10), anchor=tk.E,
-        )
-        self.progress_label.pack(anchor=tk.E)
+        self.job_tree.heading("#0",       text="File",   anchor=tk.W)
+        self.job_tree.heading("status",   text="Status", anchor=tk.W)
+        self.job_tree.heading("step",     text="Step",   anchor=tk.CENTER)
 
-        # === Output area ===============================================
+        self.job_tree.column("#0",     width=280, stretch=True)
+        self.job_tree.column("status", width=300, stretch=True)
+        self.job_tree.column("step",   width=70,  stretch=False, anchor=tk.CENTER)
+
+        self.job_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        vsb.pack(side=tk.LEFT, fill=tk.Y)
+
+        self.job_tree.bind("<<TreeviewSelect>>", self._on_job_select)
+
+        # === Log area ==================================================
+        tk.Label(
+            self.root,
+            text="Log  (click a job above to view its output):",
+            font=("Helvetica", 10), anchor=tk.W,
+        ).pack(fill=tk.X, padx=12, pady=(2, 2))
+
         self.output = scrolledtext.ScrolledText(
             self.root, wrap=tk.WORD, font=("Menlo", 11),
             bg="#1e1e1e", fg="#d4d4d4", insertbackground="#d4d4d4",
@@ -669,136 +636,281 @@ class GromacsRunnerApp:
     # ------------------------------------------------------------------
 
     def _open_settings(self):
-        """Show the settings dialog."""
-        if self._running:
-            messagebox.showinfo("Busy", "Cannot change settings while running.")
-            return
         dlg = SettingsDialog(self.root, dict(self.config))
         self.root.wait_window(dlg)
         if dlg.result is not None:
             self.config = dlg.result
 
     # ------------------------------------------------------------------
-    # Open output folder in Finder
+    # Open output folder for the selected job
     # ------------------------------------------------------------------
 
     def _open_folder(self):
-        """Open the last run directory in the system file manager."""
-        if self._last_run_dir and self._last_run_dir.is_dir():
-            system = platform.system()
-            if system == "Darwin":
-                subprocess.Popen(["open", str(self._last_run_dir)])
-            elif system == "Windows":
-                os.startfile(str(self._last_run_dir))
-            else:
-                subprocess.Popen(["xdg-open", str(self._last_run_dir)])
+        run_dir = None
+        if self._active_item and self._active_item in self._jobs:
+            run_dir = self._jobs[self._active_item].get("run_dir")
+        if not run_dir or not run_dir.is_dir():
+            return
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.Popen(["open", str(run_dir)])
+        elif system == "Windows":
+            os.startfile(str(run_dir))
+        else:
+            subprocess.Popen(["xdg-open", str(run_dir)])
 
     # ------------------------------------------------------------------
-    # Cancel
+    # Cancel all running pipelines
     # ------------------------------------------------------------------
 
     def _on_cancel(self):
-        """Ask the pipeline to stop."""
-        if self.pipeline:
-            self.pipeline.cancel()
-            self.status_var.set("Cancelling…")
+        for job in self._jobs.values():
+            pipeline = job.get("pipeline")
+            if pipeline:
+                pipeline.cancel()
+        self.status_var.set("Cancelling all jobs…")
 
     # ------------------------------------------------------------------
-    # Logging helpers (thread-safe via root.after)
+    # Job table selection → switch log view
     # ------------------------------------------------------------------
 
-    def _append_log(self, text: str):
+    def _on_job_select(self, _event=None):
+        sel = self.job_tree.selection()
+        if not sel:
+            return
+        item_id = sel[0]
+        self._active_item = item_id
+        if item_id not in self._jobs:
+            return
+        chunks = self._jobs[item_id]["log"]
         self.output.configure(state=tk.NORMAL)
-        self.output.insert(tk.END, text)
+        self.output.delete("1.0", tk.END)
+        for chunk in chunks:
+            self.output.insert(tk.END, chunk)
         self.output.see(tk.END)
         self.output.configure(state=tk.DISABLED)
-
-    def _log_from_thread(self, text: str):
-        self.root.after(0, self._append_log, text)
-
-    def _set_status_from_thread(self, text: str):
-        self.root.after(0, self.status_var.set, text)
-
-    def _set_progress_from_thread(self, current: int, total: int):
-        """Update progress bar and step label from background thread."""
-        pct = (current / total) * 100 if total else 0
-        self.root.after(0, self.progress_var.set, pct)
-        self.root.after(0, self.progress_label.configure,
-                        {"text": f"Step {current}/{total}"})
+        # Enable open folder if this job has a finished output directory
+        run_dir = self._jobs[item_id].get("run_dir")
+        if run_dir and run_dir.is_dir():
+            self.btn_open_folder.configure(state=tk.NORMAL)
+        else:
+            self.btn_open_folder.configure(state=tk.DISABLED)
 
     # ------------------------------------------------------------------
-    # PDB selection + pipeline launch
+    # Thread-safe callbacks (one set per job, created by closures)
+    # ------------------------------------------------------------------
+
+    def _make_log_callback(self, item_id: str):
+        def _cb(text: str):
+            self.root.after(0, self._on_job_log, item_id, text)
+        return _cb
+
+    def _on_job_log(self, item_id: str, text: str):
+        if item_id not in self._jobs:
+            return
+        self._jobs[item_id]["log"].append(text)
+        if self._active_item == item_id:
+            self.output.configure(state=tk.NORMAL)
+            self.output.insert(tk.END, text)
+            self.output.see(tk.END)
+            self.output.configure(state=tk.DISABLED)
+
+    def _make_status_callback(self, item_id: str):
+        def _cb(text: str):
+            self.root.after(0, self.job_tree.set, item_id, "status", text)
+        return _cb
+
+    def _make_progress_callback(self, item_id: str):
+        def _cb(current: int, total: int):
+            self.root.after(0, self.job_tree.set, item_id, "step",
+                            f"{current}/{total}")
+        return _cb
+
+    # ------------------------------------------------------------------
+    # PDB selection → launch all pipelines sequentially
     # ------------------------------------------------------------------
 
     def _on_select_pdb(self):
-        if self._running:
-            return
-
-        filepath = filedialog.askopenfilename(
-            title="Select a PDB file",
+        filepaths = filedialog.askopenfilenames(
+            title="Select PDB file(s)",
             filetypes=[("PDB files", "*.pdb"), ("All files", "*.*")],
         )
-        if not filepath:
+        if not filepaths:
             return
-
-        pdb_path = Path(filepath)
-        if not pdb_path.is_file():
-            self.status_var.set("Error — selected file does not exist")
-            return
-
-        # Clear previous output
-        self.output.configure(state=tk.NORMAL)
-        self.output.delete("1.0", tk.END)
-        self.output.configure(state=tk.DISABLED)
-
-        # Reset progress
-        self.progress_var.set(0)
-        self.progress_label.configure(text="Step 0/8")
-
-        self._append_log(f"Selected: {pdb_path}\n\n")
-        self.status_var.set("Starting pipeline…")
-
-        # Disable / enable buttons
-        self._running = True
-        self.btn_select.configure(state=tk.DISABLED)
-        self.btn_settings.configure(state=tk.DISABLED)
-        self.btn_cancel.configure(state=tk.NORMAL)
-        self.btn_open_folder.configure(state=tk.DISABLED)
 
         gmx_bin = self.config.get("gmx_path", "gmx")
         ff_key = self.ff_var.get()
 
-        self.pipeline = GromacsPipeline(
-            pdb_path=pdb_path,
-            ff_key=ff_key,
-            gmx_bin=gmx_bin,
-            log_callback=self._log_from_thread,
-            status_callback=self._set_status_from_thread,
-            progress_callback=self._set_progress_from_thread,
-        )
+        new_items = []
+        for filepath in filepaths:
+            pdb_path = Path(filepath)
+            if not pdb_path.is_file():
+                continue
 
-        thread = threading.Thread(target=self._run_pipeline, daemon=True)
-        thread.start()
+            item_id = self.job_tree.insert(
+                "", tk.END,
+                text=pdb_path.name,
+                values=("Queued", "—"),
+            )
+            job = {"pipeline": None, "thread": None, "log": [], "run_dir": None}
+            self._jobs[item_id] = job
 
-    def _run_pipeline(self):
+            pipeline = GromacsPipeline(
+                pdb_path=pdb_path,
+                ff_key=ff_key,
+                gmx_bin=gmx_bin,
+                log_callback=self._make_log_callback(item_id),
+                status_callback=self._make_status_callback(item_id),
+                progress_callback=self._make_progress_callback(item_id),
+            )
+            job["pipeline"] = pipeline
+            job["thread"] = threading.Thread(
+                target=self._run_pipeline, args=(item_id,), daemon=True
+            )
+            new_items.append(item_id)
+
+        if not new_items:
+            return
+
+        # Show the first new job's log automatically
+        first = new_items[0]
+        self.job_tree.selection_set(first)
+        self.job_tree.see(first)
+        self._active_item = first
+
+        self._running_count += len(new_items)
+        self.btn_cancel.configure(state=tk.NORMAL)
+        self.btn_select.configure(state=tk.DISABLED)
+        self.btn_settings.configure(state=tk.DISABLED)
+        self.status_var.set(f"Running {self._running_count} job(s)…")
+
+        self._job_queue.extend(new_items)
+        self._start_next_job()
+
+    # ------------------------------------------------------------------
+    # Start the next queued job (sequential mode)
+    # ------------------------------------------------------------------
+
+    def _start_next_job(self):
+        if self._job_queue:
+            item_id = self._job_queue.pop(0)
+            self._jobs[item_id]["thread"].start()
+
+    # ------------------------------------------------------------------
+    # Worker thread body
+    # ------------------------------------------------------------------
+
+    def _run_pipeline(self, item_id: str):
+        job = self._jobs[item_id]
+        pipeline = job["pipeline"]
         success = False
         try:
-            success = self.pipeline.run()
+            success = pipeline.run()
         except Exception as exc:
-            self._log_from_thread(f"\n✗ Fatal error: {exc}\n")
-            self._set_status_from_thread(f"Error — {exc}")
+            self.root.after(0, self._on_job_log, item_id,
+                            f"\n✗ Fatal error: {exc}\n")
+            self.root.after(0, self.job_tree.set, item_id, "status",
+                            f"Error — {exc}")
         finally:
-            self._running = False
-            self._last_run_dir = self.pipeline.run_dir if self.pipeline else None
+            run_dir = pipeline.run_dir if pipeline.run_dir != Path() else None
+            self.root.after(0, self._on_job_done, item_id, success, run_dir)
 
-            def _restore_ui():
-                self.btn_select.configure(state=tk.NORMAL)
-                self.btn_settings.configure(state=tk.NORMAL)
-                self.btn_cancel.configure(state=tk.DISABLED)
-                if self._last_run_dir and self._last_run_dir.is_dir():
-                    self.btn_open_folder.configure(state=tk.NORMAL)
+    def _on_job_done(self, item_id: str, success: bool, run_dir: Optional[Path]):
+        self._running_count = max(0, self._running_count - 1)
+        job = self._jobs[item_id]
+        job["run_dir"] = run_dir
+        pipeline = job["pipeline"]
 
-            self.root.after(0, _restore_ui)
+        if pipeline and pipeline._cancelled:
+            self.job_tree.set(item_id, "status", "⚠ Cancelled")
+        elif success:
+            self.job_tree.set(item_id, "status", "✅ Done")
+            self.job_tree.set(item_id, "step", "8/8")
+        else:
+            self.job_tree.set(item_id, "status", "⛔ Failed")
+
+        # Refresh open-folder button for the currently selected row
+        if self._active_item == item_id and run_dir and run_dir.is_dir():
+            self.btn_open_folder.configure(state=tk.NORMAL)
+
+        if self._running_count == 0:
+            self.btn_cancel.configure(state=tk.DISABLED)
+            self.btn_select.configure(state=tk.NORMAL)
+            self.btn_settings.configure(state=tk.NORMAL)
+            all_items = self.job_tree.get_children()
+            done = sum(
+                1 for iid in all_items
+                if "✅" in self.job_tree.set(iid, "status")
+            )
+            self.status_var.set(
+                f"All done — {done}/{len(all_items)} completed successfully"
+            )
+            self._collect_final_pdbs()
+        else:
+            self.status_var.set(f"Running {self._running_count} job(s)…")
+            self._start_next_job()
+
+    # ------------------------------------------------------------------
+    # Collect all final PDBs into one folder
+    # ------------------------------------------------------------------
+
+    def _collect_final_pdbs(self):
+        """Copy every successful job's final PDB into a shared output folder."""
+        all_items = self.job_tree.get_children()
+        pdbs_to_copy = []
+        for iid in all_items:
+            if "✅" not in self.job_tree.set(iid, "status"):
+                continue
+            job = self._jobs.get(iid)
+            if not (job and job.get("run_dir") and job.get("pipeline")):
+                continue
+            pdb_path = job["pipeline"].pdb_path
+            final_pdb = job["run_dir"] / pdb_path.name
+            if final_pdb.is_file():
+                pdbs_to_copy.append((final_pdb, pdb_path))
+
+        if not pdbs_to_copy:
+            return
+
+        # Place the output folder next to the input PDB(s)
+        parents = list({pdb.parent for _, pdb in pdbs_to_copy})
+        base_dir = (
+            parents[0]
+            if len(parents) == 1
+            else Path(os.path.commonpath([str(p) for p in parents]))
+        )
+
+        out_dir = base_dir / "minimized_pdbs"
+        counter = 2
+        while out_dir.exists():
+            out_dir = base_dir / f"minimized_pdbs_{counter}"
+            counter += 1
+        out_dir.mkdir(parents=True)
+
+        for final_pdb, orig_pdb in pdbs_to_copy:
+            dest = out_dir / orig_pdb.name
+            if dest.exists():
+                c = 2
+                while dest.exists():
+                    dest = out_dir / f"{orig_pdb.stem}_{c}{orig_pdb.suffix}"
+                    c += 1
+            shutil.copy2(str(final_pdb), str(dest))
+
+        done = len(pdbs_to_copy)
+        total = len(all_items)
+        self.status_var.set(
+            f"All done — {done}/{total} completed successfully. "
+            f"Final PDBs → {out_dir}"
+        )
+        # Log to whichever job is currently visible
+        active = self._active_item or (list(self._jobs.keys())[-1] if self._jobs else None)
+        if active:
+            self._on_job_log(
+                active,
+                f"\n{'='*60}\n"
+                f"📦 Collected {done} final PDB(s) → {out_dir}\n"
+                f"{'='*60}\n",
+            )
 
 
 # =============================================================================
