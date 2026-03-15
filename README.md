@@ -174,27 +174,17 @@ Settings are saved to `~/.gmx_runner_config.json` and persist across sessions.
 
 ```bash
 pip install pyinstaller
-pyinstaller --windowed --onefile --name GROMACS_Runner em_windows.py
-# Output: dist/GROMACS_Runner.exe
+pyinstaller --windowed --onefile em_windows.py
+# Output: dist/em_windows.exe
 ```
 
-### macOS `.app` + `.pkg` installer
-
-A build script is included that produces both a `.app` bundle and a double-click `.pkg` installer:
+### macOS `.app`
 
 ```bash
-chmod +x build_mac.sh
-./build_mac.sh
+pip3 install pyinstaller
+pyinstaller --windowed --onefile em_mac.py
+# Output: dist/em_mac (runnable app bundle)
 ```
-
-**Requirements:** Python 3.8+, pip3, Xcode Command Line Tools (`xcode-select --install`)
-
-**Output:**
-
-| File | Description |
-|---|---|
-| `dist/GROMACS Runner.app` | Drag-to-Applications app bundle |
-| `dist/GROMACS_Runner_1.0.0.pkg` | Installer — double-click to install to `/Applications` |
 
 ---
 
