@@ -13,13 +13,12 @@ A cross-platform desktop GUI that wraps the GROMACS command-line pipeline for **
 
 | | Windows (`em_windows.py`) | macOS (`em_mac.py`) |
 |---|---|---|
-| Multi-file batch runs | ✅ Up to 25+ files simultaneously | — Single file per run |
-| Per-job status table | ✅ File · Status · Step columns | — |
-| Progress bar | — | ✅ Determinate progress bar |
-| Live log viewer | ✅ Click any job row | ✅ Scrolling output pane |
-| Cancel | ✅ Cancel All button | ✅ Per-run Cancel button |
+| Multi-file batch runs | ✅ Up to 25+ files | ✅ Up to 25+ files |
+| Per-job status table | ✅ File · Status · Step columns | ✅ File · Status · Step columns |
+| Live log viewer | ✅ Click any job row | ✅ Click any job row |
+| Cancel All | ✅ | ✅ |
 | Open output folder | ✅ Per selected job | ✅ Opens in Finder |
-| Final PDB collection | ✅ Auto-copies all results to `minimized_pdbs/` | — |
+| Final PDB collection | ✅ Auto-copies all results to `minimized_pdbs/` | ✅ Auto-copies all results to `minimized_pdbs/` |
 | Force field selector | ✅ 14 fields | ✅ 14 fields |
 | Settings dialog | ✅ Custom `gmx` binary path | ✅ Custom `gmx` binary path |
 | Persistent config | ✅ `~/.gmx_runner_config.json` | ✅ `~/.gmx_runner_config.json` |
@@ -58,7 +57,7 @@ Input .pdb
 [8] trjconv      Centre protein, export final structure
     │
     ▼
-Output  <name>_run/<name>.pdb   (+ minimized_pdbs/<name>.pdb on Windows)
+Output  <name>_run/<name>.pdb   (+ minimized_pdbs/<name>.pdb)
 ```
 
 All intermediate files, the topology, and a full `run.log` are kept in the per-file workspace directory.
@@ -129,13 +128,14 @@ No additional packages required — only the Python standard library is used.
 5. Click any row in the table to view its log
 6. When all jobs finish, the final minimised structures are automatically collected into a `minimized_pdbs/` folder next to your input files
 
-### macOS — Single File
+### macOS — Batch Mode
 
 1. **Launch** `em_mac.py`
-2. Click **Select PDB** and choose a `.pdb` file
+2. Click **Select PDB(s)** and choose one or more `.pdb` files
 3. Select a **Force Field** from the dropdown
-4. Watch the progress bar and live log as the pipeline runs
-5. Click **Open Output Folder** to reveal results in Finder
+4. Jobs run sequentially; the table shows live status per file
+5. Click any row in the table to view its log
+6. When all jobs finish, the final minimised structures are automatically collected into a `minimized_pdbs/` folder next to your input files
 
 ### Configuring the GROMACS Path
 
@@ -161,7 +161,7 @@ Settings are saved to `~/.gmx_runner_config.json` and persist across sessions.
 │   └── ...
 ├── protein_B_run/
 │   └── ...
-└── minimized_pdbs/                 ← Windows only: all final PDBs collected here
+└── minimized_pdbs/                 ← all final PDBs collected here
     ├── protein_A.pdb
     └── protein_B.pdb
 ```
